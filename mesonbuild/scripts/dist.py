@@ -13,14 +13,16 @@
 # limitations under the License.
 
 
-import os
+import os, sys
 import shutil
 import argparse
 import subprocess
 import pickle
 import hashlib
 import tarfile, zipfile
+import tempfile
 from glob import glob
+from mesonbuild.environment import detect_ninja
 
 def create_hash(fname):
     hashname = fname + '.sha256sum'
@@ -58,12 +60,46 @@ def create_dist(dist_name, src_root, bld_root, dist_sub):
         os.unlink(f)
     xzname = distdir + '.tar.xz'
     zipname = distdir + '.zip'
+    # Should use shutil but it got xz support only in 3.5.
     tf = tarfile.open(xzname, 'w:xz')
     tf.add(distdir, os.path.split(distdir)[1])
     tf.close()
     create_hash(xzname)
     create_zip(zipname, distdir)
     create_hash(zipname)
+    return (xzname, zipname)
+
+def check_dist(packagename):
+    print('Testing distribution package %s.' % packagename)
+    unpackdir = tempfile.mkdtemp()
+    builddir = tempfile.mkdtemp()
+    installdir = tempfile.mkdtemp()
+    ninja_bin = detect_ninja()
+    try:
+        tf = tarfile.open(packagename)
+        tf.extractall(unpackdir)
+        srcdir = glob(os.path.join(unpackdir, '*'))[0]
+        mesonbin = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..', 'meson.py')
+        if subprocess.call([sys.executable, mesonbin, srcdir, builddir]) != 0:
+            print('Running Meson on distribution package failed')
+            return 1
+        if subprocess.call([ninja_bin], cwd=builddir) != 0:
+            print('Compiling the distribution package failed.')
+            return 1
+        if subprocess.call([ninja_bin, 'test'], cwd=builddir) != 0:
+            print('Running unit tests on the distribution package failed.')
+            return 1
+        myenv = os.environ.copy()
+        myenv['DESTDIR'] = installdir
+        if subprocess.call([ninja_bin, 'install'], cwd=builddir, env=myenv) != 0:
+            print('Installing the distribution package failed.')
+            return 1
+    finally:
+        shutil.rmtree(srcdir)
+        shutil.rmtree(builddir)
+        shutil.rmtree(installdir)
+    print('Distribution package %s tested.' % packagename)
+    return 0
 
 def run(args):
     src_root = args[0]
@@ -80,6 +116,8 @@ def run(args):
     if not os.path.isdir(os.path.join(src_root, '.git')):
         print('Dist currently only works with Git repos.')
         return 1
-    create_dist(dist_name, src_root, bld_root, dist_sub)
+    names = create_dist(dist_name, src_root, bld_root, dist_sub)
+    if names is None:
+        return 1
 
-    return 0
+    return check_dist(names[0]) # Currently only one.
